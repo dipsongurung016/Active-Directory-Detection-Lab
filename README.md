@@ -23,6 +23,8 @@ A four-machine cybersecurity home lab built to practise the workflow of a Securi
 
 **Tools used:** Oracle VirtualBox, Windows Server 2022, Windows 10, Active Directory Domain Services (AD DS), Kali Linux, FreeRDP, Hydra, Splunk Enterprise, Sysmon, Splunk Universal Forwarder, PowerShell and Atomic Red Team.
 
+**SOC case studies:** [RDP Password-Guessing Investigation](docs/rdp-authentication-investigation.md) · [Atomic Red Team Telemetry Investigation](docs/atomic-red-team.md)
+
 ## 1. Lab architecture
 
 ```mermaid
@@ -218,6 +220,17 @@ A narrower search using the technique label `T1059.001` and `AtomicRedTeam` retu
 ![Focused T1059.001 Sysmon evidence](screenshots/16-atomic-t1059-001-detection.png)
 
 *Figure 16 — Three focused matches for T1059.001-related activity in Sysmon; sensitive command-line data redacted.*
+
+### 3.6 Detailed SOC investigation reports
+
+I wrote two evidence-based case studies to show the investigation process beyond the screenshots in this README:
+
+| Investigation | What I analysed | Read the report |
+|---|---|---|
+| **RDP password guessing** | Hydra test results; Windows Security Events `4625` (failed logons) and `4624` (successful logon); source attribution and investigative limitations | [Case Study 01 — RDP Authentication Investigation](docs/rdp-authentication-investigation.md) |
+| **Atomic Red Team telemetry** | `T1595.003` and `T1059.001` test output; Sysmon process creation and image-load events; execution errors and detection limitations | [Case Study 02 — Atomic Red Team Investigation](docs/atomic-red-team.md) |
+
+Both reports distinguish **what was observed in Splunk** from **whether the simulated technique succeeded**. The SPL searches in the reports were used for manual investigation, not represented as deployed automatic alerts.
 
 ## 4. What the evidence shows — and what it does not
 
