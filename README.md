@@ -1,76 +1,117 @@
 # Active Directory Detection Lab
 
-A hands-on cybersecurity home lab built to practise how a SOC analyst collects Windows telemetry, investigates security events, and develops detections in Splunk.
+**Active Directory · Windows Security Events · Sysmon · Splunk Enterprise · Kali Linux · Atomic Red Team**
 
-**Current status:** MyDFIR's *Active Directory Project (Home Lab)* **Parts 1–4 completed and core setup verified**. Part 5 (attack simulation and detection) is next.
+A four-machine cybersecurity home lab built to practise the workflow of a Security Operations Centre (SOC) analyst: **generate activity, collect evidence, investigate the logs, and explain the findings**.
 
-## Project overview
+**Project status:** Completed all five parts of MyDFIR's *Active Directory Project (Home Lab)* walkthrough. The lab setup, RDP password-guessing exercise, and Atomic Red Team-related telemetry are documented below. Some Atomic tests failed to achieve their intended objectives; those outcomes are recorded rather than treated as successful attacks.
 
-I built a small Windows domain environment in Oracle VirtualBox, with a Domain Controller, a domain-joined Windows 10 workstation, Kali Linux, and a Splunk Enterprise server. The aim is to learn the workflow a SOC analyst follows: **generate activity → collect logs → search → investigate → document findings**.
+> **Scope:** This is an isolated *testing environment* on a VirtualBox NAT Network, not a production deployment or an air-gapped network. All simulated activity was performed against lab systems under my control.
 
-This repository documents my own lab configuration and the results I verified while following MyDFIR's tutorial. The environment is for authorised testing only, not a production network.
+## Project results
 
-## Lab architecture
+| Area | What I verified |
+|---|---|
+| Active Directory | Configured the `silicon.local` domain, DNS, organisational units and test users on Windows Server 2022 |
+| Domain workstation | Joined `TARGET-PC` to the domain and authenticated with a domain account |
+| Central log collection | Windows Security, Application, System and Sysmon events from both Windows VMs appeared in Splunk's `endpoint` index |
+| Initial telemetry check | **87,127 indexed events** in a historical Splunk search on 12 October 2026 (a snapshot, not a daily rate) |
+| RDP authentication | Confirmed a successful FreeRDP session from Kali to `TARGET-PC` as `SILICON\tsmith` |
+| Controlled password guessing | Hydra reported **one valid lab credential** from a 22-candidate password list |
+| RDP investigation | A Splunk search showed **18 Event ID 4625** failure matches; a separate search showed **one Event ID 4624** success match from Kali |
+| Atomic Red Team | Captured a `T1595.003`-related PowerShell process (Sysmon Event ID 1) and `T1059.001`-labelled image-load activity (Sysmon Event ID 7) |
+
+**Tools used:** Oracle VirtualBox, Windows Server 2022, Windows 10, Active Directory Domain Services (AD DS), Kali Linux, FreeRDP, Hydra, Splunk Enterprise, Sysmon, Splunk Universal Forwarder, PowerShell and Atomic Red Team.
+
+## 1. Lab architecture
 
 ```mermaid
 flowchart LR
     subgraph LAB["VirtualBox NAT Network: AD-Lab (192.168.10.0/24)"]
-        K["Kali Linux<br/>Test machine"]
-        DC["ADDC01<br/>Windows Server 2022<br/>192.168.10.7"]
-        PC["TARGET-PC<br/>Windows 10<br/>192.168.10.100 observed"]
+        K["Kali Linux<br/>192.168.10.250"]
+        DC["ADDC01<br/>Windows Server 2022<br/>AD DS / DNS<br/>192.168.10.7"]
+        PC["TARGET-PC<br/>Windows 10<br/>192.168.10.100"]
         S["Splunk Enterprise<br/>Ubuntu Server<br/>192.168.10.10"]
     end
-    DC ---|"Active Directory / DNS"| PC
-    DC -->|"Windows + Sysmon events"| S
-    PC -->|"Windows + Sysmon events"| S
-    K -.->|"Planned Part 5 tests"| PC
+    K -->|"FreeRDP / controlled Hydra tests"| PC
+    DC <-->|"Domain authentication and DNS"| PC
+    DC -->|"Windows and Sysmon events"| S
+    PC -->|"Windows and Sysmon events"| S
 ```
 
-Splunk has indexed Windows and Sysmon events from **both** Windows systems. The dashed line from Kali represents **planned** simulation work, not a completed attack. The VirtualBox NAT Network is separate from the host's physical LAN but may still allow outbound internet access; it is not air-gapped.
+| System | Purpose | IP address |
+|---|---|---|
+| `ADDC01` | Domain Controller, AD DS and DNS | `192.168.10.7` |
+| `TARGET-PC` | Domain-joined Windows 10 endpoint, logging and simulation | `192.168.10.100` |
+| `kali` | Authorised security test machine | `192.168.10.250` |
+| `splunk` | Centralised event ingestion and investigation | `192.168.10.10` |
 
-## Environment and network
+**Host operating system:** EndeavourOS. **Lab domain:** `silicon.local`. **Virtual network:** `AD-Lab`, `192.168.10.0/24`, DHCP enabled. **Splunk Web:** `http://192.168.10.10:8000` (lab address).
 
-| Machine | Role | OS / software | IP address |
-|---|---|---|---|
-| Host | Virtualisation platform | EndeavourOS, Oracle VirtualBox | — |
-| `ADDC01` | Domain Controller / DNS | Windows Server 2022, Active Directory Domain Services | `192.168.10.7` (static) |
-| `TARGET-PC` (VirtualBox VM: `window10`) | Domain-joined endpoint | Windows 10 | `192.168.10.100` (observed) |
-| `splunk` | SIEM / log analysis | Ubuntu Server, Splunk Enterprise 10.4.3 | `192.168.10.10` |
-| Kali Linux | Authorised test machine for Part 5 | Kali Linux | To be verified before Part 5 |
+## 2. Building the environment — Parts 1–4
 
-**Verified lab settings:**
+### Part 1 — Virtual machines and networking
 
-- VirtualBox NAT Network: `AD-Lab`, subnet `192.168.10.0/24`, DHCP enabled.
-- Active Directory domain: `silicon.local`.
-- ADDC01 gateway: `192.168.10.1`.
-- ADDC01 uses local DNS (`127.0.0.1` / `::1`); an Active Directory DNS lookup resolved `addc01.silicon.local` to `192.168.10.7`.
-- Splunk Web: `http://192.168.10.10:8000`.
-- TCP `9997` is the planned Splunk forwarding port; its listener configuration has not been separately documented, although log ingestion is verified.
+Created the four virtual machines and connected them to the same VirtualBox NAT Network. Verified the subnet and DHCP configuration before configuring the servers and endpoints.
 
-## What I completed (Parts 1–4)
+![VirtualBox lab machines](screenshots/01-virtualbox-overview.png)
 
-### 1. Virtual machines and lab network
+*Figure 1 — The four VirtualBox lab machines.*
 
-Created the four VirtualBox machines and configured them on the `AD-Lab` NAT Network. The separate lab subnet allows the Windows machines, Kali, and Splunk to communicate for testing and log collection.
+![AD-Lab NAT Network](screenshots/02-nat-network.png)
 
-**Verified:** Four VMs are registered in VirtualBox, and the NAT Network is configured with `192.168.10.0/24` and DHCP enabled.
+*Figure 2 — NAT Network `AD-Lab` on `192.168.10.0/24`.*
 
-### 2. Active Directory and Windows workstation
+### Part 2 — Active Directory and DNS
 
-Configured `ADDC01` as the Domain Controller for `silicon.local`. Created organisational units to represent two departments:
+Configured `ADDC01` as the Domain Controller for `silicon.local`. Organised lab users into department-based OUs:
 
-| Organisational unit | Test account |
-|---|---|
-| `IT` | Jenny Smith |
-| `HR` | Terry Smith |
+| Organisational unit | Test user | Username |
+|---|---|---|
+| `IT` | Jenny Smith | `jsmith` |
+| `HR` | Terry Smith | `tsmith` |
 
-Joined the Windows 10 workstation, `TARGET-PC`, to the domain. PowerShell returned `PartOfDomain : True`. I also verified that ADDC01's local DNS service resolves the domain controller's LDAP SRV record.
+Verified domain DNS discovery by resolving the LDAP service record for `silicon.local`, which identified `addc01.silicon.local` at `192.168.10.7`.
 
-**Verified:** Domain structure, test users, domain membership, and DNS resolution. This does not by itself prove every authentication or Group Policy operation works.
+<details>
+<summary>View Active Directory and DNS evidence (Figures 3–5b)</summary>
 
-### 3. Splunk and Windows security telemetry
+![Domain Controller IP configuration](screenshots/03-addc01-network.png)
 
-Configured the Splunk environment and followed the Windows event-collection and Sysmon setup from MyDFIR's series. I then checked the indexed data using a **historical All time** search, rather than a real-time-only search.
+*Figure 3 — ADDC01 IP and DNS configuration.*
+
+![Active Directory DNS SRV lookup](screenshots/04-ad-dns-verification.png)
+
+*Figure 4 — LDAP SRV lookup identifying the Domain Controller.*
+
+![IT OU](screenshots/05a-ad-it-users.png)
+
+*Figure 5a — IT OU and the `jsmith` test account.*
+
+![HR OU](screenshots/05b-ad-hr-users.png)
+
+*Figure 5b — HR OU and the `tsmith` test account.*
+
+</details>
+
+### Part 3 — Windows workstation domain join
+
+Joined `TARGET-PC` to `silicon.local` and verified that Windows reported `PartOfDomain = True`. Later confirmed an interactive domain login through RDP using `SILICON\tsmith`.
+
+![Domain join verification](screenshots/06-windows10-domain-join.png)
+
+*Figure 6 — Windows 10 domain membership verification.*
+
+### Part 4 — Splunk and Sysmon telemetry
+
+Configured Windows event forwarding to Splunk and verified that both `ADDC01` and `TARGET-PC` had events in the `endpoint` index. The indexed data included:
+
+- `WinEventLog:Security`
+- `WinEventLog:Application`
+- `WinEventLog:System`
+- `XmlWinEventLog:Microsoft-Windows-Sysmon/Operational`
+
+**Verification query:**
 
 ```spl
 index=endpoint
@@ -78,116 +119,152 @@ index=endpoint
 | sort host sourcetype
 ```
 
-**Verification result (12 October 2026): 87,127 indexed events** across `ADDC01` and `target-PC` at the time of the search.
+The historical search showed **87,127 matching events** on 12 October 2026. Later Part 5 tests also produced events visible in Splunk, demonstrating fresh telemetry delivery.
 
-| Data source / sourcetype | ADDC01 | TARGET-PC |
-|---|:---:|:---:|
-| `WinEventLog:Application` | Yes | Yes |
-| `WinEventLog:Security` | Yes | Yes |
-| `WinEventLog:System` | Yes | Yes |
-| `XmlWinEventLog:Microsoft-Windows-Sysmon/Operational` | Yes | Yes |
+![Splunk event ingestion](screenshots/07-splunk-log-ingestion.png)
 
-This confirms that historical Windows and Sysmon telemetry from **both hosts** is available in Splunk's `endpoint` index. The next step is to generate new security events and confirm they arrive and can be investigated during Part 5.
+*Figure 7 — Historical Windows and Sysmon events indexed for both hosts.*
 
-![Splunk search showing events from ADDC01 and TARGET-PC](screenshots/07-splunk-log-ingestion.png)
+## 3. Security testing and investigation — Part 5
 
-*Figure 7: Historical Splunk search showing Windows Application, Security, System and Sysmon logs from both ADDC01 and TARGET-PC (87,127 matched events).* 
+### 3.1 Establishing an RDP baseline
 
-## Setup evidence (Parts 1–4)
+Before simulating password guessing, I connected from Kali to `TARGET-PC` using FreeRDP and the lab account `SILICON\tsmith`. In the remote Windows session, `whoami`, `hostname`, and `ipconfig` confirmed the authenticated user and destination workstation.
 
-These screenshots were captured **after the initial setup**, to verify the current configuration. They are not presented as installation-time screenshots.
+![Successful FreeRDP session](screenshots/08-kali-rdp-session.png)
 
-<details>
-<summary><strong>Figures 1–2: VirtualBox environment and NAT Network</strong></summary>
+*Figure 8 — Kali FreeRDP session; Windows reports `silicon\tsmith`, `target-PC` and `192.168.10.100`.*
 
-![VirtualBox Manager showing the four lab VMs](screenshots/01-virtualbox-overview.png)
+**Why this mattered:** It established that the RDP service, Active Directory account and domain authentication worked before the password-guessing test.
 
-*Figure 1: VirtualBox Manager showing the Kali Linux, Windows 10, ADDC01 and Splunk virtual machines.*
+### 3.2 Controlled RDP password guessing with Hydra
 
-![VirtualBox NAT Network configuration](screenshots/02-nat-network.png)
+I used Hydra on Kali to test RDP authentication against the Windows workstation. The test used a lab password file containing **22 candidate entries** and targeted the `tsmith` domain account. Hydra v9.7 reported **one valid credential found** and one target successfully completed. The credential is redacted from the evidence image.
 
-*Figure 2: `AD-Lab` NAT Network configured with `192.168.10.0/24` and DHCP enabled.*
+**Relevant MITRE ATT&CK mapping:** [T1110.001 — Password Guessing](https://attack.mitre.org/techniques/T1110/001/). This mapping describes the simulated behaviour; it is not a claim that an intrusion occurred outside the lab.
 
-</details>
+![Hydra result with password redacted](screenshots/09-hydra-rdp-password-guessing.png)
 
-<details>
-<summary><strong>Figures 3–4: Domain Controller networking and DNS</strong></summary>
+*Figure 9 — Controlled Hydra RDP test reporting one valid lab credential; the password has been redacted.*
 
-![ADDC01 ipconfig output](screenshots/03-addc01-network.png)
+### 3.3 Investigating failed and successful logons in Splunk
 
-*Figure 3: ADDC01 network configuration, including static address `192.168.10.7`, gateway and DNS settings.*
+I searched Windows Security logs collected from `TARGET-PC` and filtered on activity associated with Kali (`192.168.10.250`).
 
-![Active Directory DNS SRV lookup](screenshots/04-ad-dns-verification.png)
+**Failed-logon query:**
 
-*Figure 4: LDAP SRV lookup successfully identifying `addc01.silicon.local` at `192.168.10.7` on port `389`.*
+```spl
+index=endpoint EventCode=4625 kali
+```
 
-</details>
+The search returned **18 matching failed-logon events** in the displayed 15-minute window. The event details identified Kali as the workstation and `192.168.10.250` as the source IP.
 
-<details>
-<summary><strong>Figures 5a–5b: Active Directory users and organisational units</strong></summary>
+![Failed authentication events](screenshots/10-splunk-rdp-failed-logons.png)
 
-![Active Directory IT OU and Jenny Smith](screenshots/05a-ad-it-users.png)
+*Figure 10 — Eighteen Windows Security Event ID 4625 matches associated with Kali.*
 
-*Figure 5a: IT organisational unit with the Jenny Smith test account.*
+**Successful-logon query:**
 
-![Active Directory HR OU and Terry Smith](screenshots/05b-ad-hr-users.png)
+```spl
+index=endpoint EventCode=4624 kali
+```
 
-*Figure 5b: HR organisational unit with the Terry Smith test account.*
+A separate search returned **one matching successful-logon event** in its displayed 15-minute window, again associated with Kali.
 
-</details>
+![Successful authentication event](screenshots/11-splunk-rdp-successful-logon.png)
 
-<details>
-<summary><strong>Figure 6: Windows 10 domain membership</strong></summary>
+*Figure 11 — Windows Security Event ID 4624 associated with the Kali source.*
 
-![Windows 10 PowerShell domain membership verification](screenshots/06-windows10-domain-join.png)
+**Interpretation:** The Hydra result and Windows logs provide evidence of controlled password-guessing activity and both failed and successful authentication. Earlier manually verified events also showed successful RDP **Logon Type 10** and failed network authentication **Logon Type 3** with substatus `0xC000006A` (incorrect password). The 18 failures and one success are **Splunk event counts**, not a claim that all 22 configured passwords were attempted or that every event maps one-to-one to a candidate.
 
-*Figure 6: PowerShell verification showing `TARGET-PC` joined to `silicon.local` (`PartOfDomain = True`).*
+**Investigation query:**
 
-</details>
+```spl
+index=endpoint host="target-PC" (EventCode=4624 OR EventCode=4625) "192.168.10.250"
+| table _time host EventCode Message
+| sort -_time
+```
 
-## Current progress
+### 3.4 Atomic Red Team — T1595.003 Wordlist Scanning
 
-- [x] Create and configure the four VirtualBox lab machines.
-- [x] Configure the `AD-Lab` NAT Network.
-- [x] Configure `ADDC01` and verify Active Directory DNS resolution.
-- [x] Create HR and IT organisational units and test users.
-- [x] Join `TARGET-PC` to `silicon.local`.
-- [x] Install and access Splunk Enterprise.
-- [x] Verify historical Windows Security, Application, System and Sysmon events in Splunk for both Windows machines.
-- [ ] Verify fresh event delivery during a controlled test.
-- [ ] Confirm Kali's current IP configuration before the first Part 5 simulation.
-- [ ] Complete MyDFIR Part 5 attack simulations.
-- [ ] Write SPL detections and publish evidence-backed investigations.
+Used Atomic Red Team to attempt **T1595.003 (Wordlist Scanning)** on `TARGET-PC`. The PowerShell test returned **`Target is not reachable`** (exit code `1`), so I do **not** claim that a completed web scan occurred.
 
-## Next: Part 5 — Attack simulation and detection
+![Atomic Red Team T1595.003 output](screenshots/12-atomic-t1595-wordlist-test.png)
 
-The next stage is to use **Kali Linux and authorised test activity** to generate security events, then analyse them in Splunk. MyDFIR Part 5 also introduces Atomic Red Team.
+*Figure 12 — The wordlist-scanning test was attempted but reported an unreachable target.*
 
-For each exercise, I plan to document:
+I then searched Splunk for the test activity and found a **Sysmon Event ID 1 (Process Creation)** referencing the PowerShell command and the `T1595.003` Atomic Red Team path. The process-creation event proves the associated command was observed; it does not establish a successful scan. The event's Sysmon `RuleName` mentions `T1083`, which is a rule label and should not be confused with the Atomic test ID.
 
-1. **Objective and scope** — What was tested, and on which lab system.
-2. **Evidence** — Event IDs, accounts, timestamps, source details and screenshots.
-3. **Detection** — SPL query, time window and reason for investigating the result.
-4. **Analysis** — What the events show, what remains uncertain and possible false positives.
-5. **Outcome** — Findings, next steps and MITRE ATT&CK mapping where supported by the evidence.
+![Sysmon process-creation event for Atomic T1595.003](screenshots/13-atomic-t1595-sysmon-detection.png)
 
-Planned investigation topics include failed logons (`4625`), successful logons (`4624`), changes to accounts or privileged groups, and suspicious process activity using Windows Security logs and Sysmon. **These are planned exercises, not completed detections.**
+*Figure 13 — Sysmon process telemetry for the Atomic T1595.003 attempt, collected in Splunk.*
 
-## Issues encountered and lessons learned
+### 3.5 Atomic Red Team — T1059.001 PowerShell
 
-- **Splunk Web access:** Both Windows machines initially displayed an XML `Connection refused` response. Tests showed TCP connectivity to port `8000`, and the Splunk server was listening on ports `8000` and `8089`. Splunk Web access was later restored; I did not record the exact final fix, so I am not claiming a specific root cause.
-- **VM storage:** The dedicated VM partition filled up during the project. I recovered usable space and moved the Kali VM to a different host partition using VirtualBox's Move feature without reinstalling Kali.
-- **Verification:** I learned to distinguish a successful network connection from a working application, and a few visible events from a verified historical logging pipeline.
+I also attempted Atomic tests associated with **T1059.001 (PowerShell)**. Some test steps returned errors, including an access-denied result and missing BloodHound-related commands or modules. These results were retained as troubleshooting evidence, **not reported as successful technique execution**.
 
-## Repository organisation
+![T1059.001 execution attempts](screenshots/14-atomic-t1059-powershell-test.png)
 
-- `README.md` — Lab overview, implementation status and evidence.
-- `screenshots/` — Verified screenshots from Parts 1–4.
-- `diagrams/` — Diagram assets; the current architecture is also shown above in Mermaid.
-- **Planned:** Separate `docs/` and detection-query files for Part 5 investigation reports.
+*Figure 14 — PowerShell execution attempts and errors during Atomic Red Team testing.*
 
-## Learning reference and attribution
+A broad Splunk search for `T1059` returned **1,447 matching events** in the selected window. That is a search-result count, **not** a count of attacks or successful tests.
 
-This project follows [MyDFIR's *Active Directory Project (Home Lab)* series](https://www.youtube.com/@MyDFIR) for the foundational build, particularly [Part 4](https://www.youtube.com/watch?v=1XeDht_B-bA) and [Part 5](https://www.youtube.com/watch?v=orq-OPIdV9M). Credit for the tutorial structure and procedures belongs to MyDFIR. The configuration checks, screenshots and findings here are from my own lab.
+![Broad Splunk T1059 search results](screenshots/15-atomic-t1059-splunk-events.png)
 
-**Safety:** All simulated activity is restricted to lab systems I own or am authorised to test. No real user credentials, secrets, or production systems are used in this project.
+*Figure 15 — Broad T1059-related search results in Splunk.*
+
+A narrower search using the technique label `T1059.001` and `AtomicRedTeam` returned **three matching events**. The visible event contents included **Sysmon Event ID 7 (Image Loaded)** activity involving `amsi.dll`. This demonstrates detection visibility for associated activity; it does not independently establish that the intended Atomic technique completed successfully. A command-line password in the screenshot has been redacted.
+
+![Focused T1059.001 Sysmon evidence](screenshots/16-atomic-t1059-001-detection.png)
+
+*Figure 16 — Three focused matches for T1059.001-related activity in Sysmon; sensitive command-line data redacted.*
+
+## 4. What the evidence shows — and what it does not
+
+| Verified finding | Important limit |
+|---|---|
+| Both Windows hosts delivered events to Splunk | A historical event total is not a performance or availability guarantee |
+| Kali opened an authenticated FreeRDP session | This is authorised testing, not evidence of unauthorised access |
+| Hydra reported one valid credential | A 22-entry candidate list does not prove 22 authentication attempts were processed |
+| Windows recorded 4625 failures and a 4624 success | The screenshots do not establish a one-to-one match between every Hydra attempt and Windows event |
+| Splunk recorded the T1595.003 PowerShell process | The scan itself reported its target unreachable |
+| Splunk recorded T1059.001-related Sysmon image loads | Image-load events alone do not establish completion of the Atomic test |
+
+I used Splunk **searches and manual investigation**, rather than claiming to have deployed or validated an automated brute-force detection alert.
+
+## 5. Troubleshooting and lessons learned
+
+- **Domain DNS dependency:** `TARGET-PC` could reach `8.8.8.8` but could not resolve GitHub because its DNS server (`ADDC01`, `192.168.10.7`) was powered off. Booting ADDC01 restored domain-name resolution.
+- **Authentication tool behaviour:** Earlier Crowbar, Ncrack and Hydra tests did not produce a confirmed valid-password result. Manual FreeRDP authentication worked, and a later Hydra run succeeded. Separating tool errors from Windows authentication failures avoided unnecessary changes to Active Directory.
+- **Evidence validation:** Windows Security Event IDs `4624` and `4625` provided the account, source and authentication outcome. Sysmon supplied process and image-load context for Atomic Red Team attempts.
+- **Atomic test prerequisites:** Missing dependencies or an unreachable target can prevent an Atomic test from completing even when the process is visible in the logs.
+- **Virtual machine storage:** Recovered space on a full VM storage partition and relocated the Kali virtual disk using VirtualBox without reinstalling the guest.
+
+## 6. Screenshot index
+
+All images below are from the lab. Screenshots 1–7 verify the setup; screenshots 8–16 document Part 5 tests and observed events.
+
+| Figure | Evidence |
+|---|---|
+| 01 | [VirtualBox machines](screenshots/01-virtualbox-overview.png) |
+| 02 | [VirtualBox NAT Network](screenshots/02-nat-network.png) |
+| 03 | [ADDC01 network configuration](screenshots/03-addc01-network.png) |
+| 04 | [Active Directory DNS verification](screenshots/04-ad-dns-verification.png) |
+| 05a / 05b | [IT OU](screenshots/05a-ad-it-users.png) / [HR OU](screenshots/05b-ad-hr-users.png) |
+| 06 | [Windows 10 domain join](screenshots/06-windows10-domain-join.png) |
+| 07 | [Splunk log ingestion](screenshots/07-splunk-log-ingestion.png) |
+| 08 | [Kali RDP session](screenshots/08-kali-rdp-session.png) |
+| 09 | [Hydra result, redacted](screenshots/09-hydra-rdp-password-guessing.png) |
+| 10 | [Splunk failed logons, 4625](screenshots/10-splunk-rdp-failed-logons.png) |
+| 11 | [Splunk successful logon, 4624](screenshots/11-splunk-rdp-successful-logon.png) |
+| 12 | [Atomic T1595.003 test output](screenshots/12-atomic-t1595-wordlist-test.png) |
+| 13 | [T1595.003 Sysmon process evidence](screenshots/13-atomic-t1595-sysmon-detection.png) |
+| 14 | [Atomic T1059.001 test output](screenshots/14-atomic-t1059-powershell-test.png) |
+| 15 | [Broad T1059 Splunk results](screenshots/15-atomic-t1059-splunk-events.png) |
+| 16 | [Focused T1059.001 Sysmon evidence, redacted](screenshots/16-atomic-t1059-001-detection.png) |
+
+## 7. Attribution and responsible use
+
+This project follows the learning structure of [MyDFIR's *Active Directory Project (Home Lab)* video series](https://www.youtube.com/@MyDFIR), especially [Part 4](https://www.youtube.com/watch?v=1XeDht_B-bA) and [Part 5](https://www.youtube.com/watch?v=orq-OPIdV9M). Credit for the walkthrough belongs to MyDFIR; the configuration checks, troubleshooting, screenshots and findings here describe my own lab work.
+
+Testing was limited to machines in the authorised VirtualBox environment. No production systems or third-party targets were tested, and real passwords or private keys are not published.
